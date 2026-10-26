@@ -1,0 +1,6 @@
+k,inertia,silhouette,sizes,method,dataset,elapsed_s
+2,19.8402,0.0626,"[17, 7]",tfidf,sample_documents.csv,0.375
+3,18.385,0.0806,"[10, 3, 11]",tfidf,sample_documents.csv,0.375
+4,17.051,0.0783,"[6, 8, 6, 4]",tfidf,sample_documents.csv,0.375
+5,15.8445,0.0878,"[7, 3, 5, 5, 4]",tfidf,sample_documents.csv,0.375
+6,14.4619,0.115,"[4, 3, 7, 4, 4, 2]",tfidf,sample_documents.csv,0.375
