@@ -21,5 +21,7 @@ export const uploadFile = (file) => {
   });
 };
 
+export const selectCorpus = (corpusName) => api.post(`/corpus/select?corpus_name=${encodeURIComponent(corpusName)}`);
+
 export default api;
 

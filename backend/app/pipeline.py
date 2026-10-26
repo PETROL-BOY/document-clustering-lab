@@ -43,6 +43,33 @@ def sanitize_csv_cell(value: Any) -> str:
     return s
 
 
+def clean_academic_text(text: str) -> str:
+    """Clean extracted academic PDF text to remove noise, bibliographies, and formatting artifacts."""
+    if not text:
+        return ""
+    # 1. Truncate references / bibliography if found in the second half of the document
+    ref_match = re.search(r'\n\s*(?:REFERENCES|References|BIBLIOGRAPHY|Bibliography)\s*\n', text)
+    if ref_match and ref_match.start() > len(text) * 0.45:
+        text = text[:ref_match.start()]
+
+    # 2. Strip common arXiv, download, and DOI banners
+    text = re.sub(r'arXiv:\d+\.\d+(?:v\d+)?\s*\[[^\]]+\]\s*\d+\s+[A-Za-z]+\s+\d{4}', '', text)
+    text = re.sub(r'Downloaded from .*? on [A-Za-z]+ \d+, \d{4}', '', text)
+    text = re.sub(r'https?://[^\s]+', '', text)
+
+    # 3. Fix hyphenated line breaks ('infor-\nmation' -> 'information')
+    text = re.sub(r'(\b[A-Za-z]+)-\s*\n\s*([A-Za-z]+\b)', r'\1\2', text)
+
+    # 4. Remove standalone page number lines
+    text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+
+    # 5. Fix single newline wraps and normalize whitespace
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    return text.strip()
+
+
 def read_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from PDF and check scanned heuristic."""
     reader = PdfReader(io.BytesIO(file_bytes))
@@ -64,7 +91,8 @@ def read_text_from_pdf(file_bytes: bytes) -> str:
             "OCR is not supported in this version."
         )
 
-    return "\n\n".join(full_text)
+    raw_text = "\n\n".join(full_text)
+    return clean_academic_text(raw_text)
 
 
 def ingest_file(filename: str, content_bytes: bytes) -> List[Dict[str, Any]]:
@@ -260,7 +288,6 @@ def _embed_batch_with_retry(
     Raises the last exception if all retries exhausted.
     """
     from google.genai import types
-    import google.api_core.exceptions as _gae
 
     delay = 10.0
     for attempt in range(max_retries):
@@ -493,7 +520,8 @@ def run_clustering_analysis(
     k: int = 4,
     method: str = "gemini",
     algorithm: str = "kmeans",
-    generate_llm_themes: bool = True
+    generate_llm_themes: bool = True,
+    embeddings: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Full pipeline run: vectorization -> clustering -> representative selection -> c-TF-IDF -> themes -> PCA.
@@ -505,7 +533,9 @@ def run_clustering_analysis(
         raise ValueError(f"Cluster count K ({k}) must be strictly smaller than chunk count ({n_chunks}).")
 
     # 1. Representation
-    if method == "tfidf":
+    if embeddings is not None:
+        X = embeddings
+    elif method == "tfidf":
         X, _ = vectorize_chunks_tfidf(chunks)
     else:
         X = embed_chunks_gemini(chunks)

@@ -61,7 +61,20 @@ session_state: Dict[str, Any] = {
 
 
 def load_default_corpus():
-    """Load bundled sample_documents.csv as the initial corpus."""
+    """Load research papers if available, else load bundled sample_documents.csv."""
+    papers_path = Path(__file__).resolve().parent.parent / "data" / "research_papers_corpus.json"
+    if papers_path.exists():
+        try:
+            with open(papers_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            chunks = [DocumentChunk(**c) for c in data["chunks"]]
+            session_state["docs"] = data["docs"]
+            session_state["chunks"] = chunks
+            session_state["dataset_name"] = data.get("dataset_name", "research_papers")
+            return
+        except Exception as e:
+            print(f"Notice: Could not load research papers corpus: {e}")
+
     sample_path = Path(__file__).resolve().parent.parent / "data" / "sample_documents.csv"
     if sample_path.exists():
         with open(sample_path, "rb") as f:
@@ -78,6 +91,38 @@ try:
     load_default_corpus()
 except Exception as e:
     print(f"Warning: Failed to load default corpus: {e}")
+
+
+@app.post("/api/corpus/select")
+def select_active_corpus(corpus_name: str = Query(..., description="'sample' or 'research_papers'")):
+    """Switch active corpus between sample documents and research papers."""
+    if corpus_name in ("research_papers", "papers"):
+        papers_path = Path(__file__).resolve().parent.parent / "data" / "research_papers_corpus.json"
+        if not papers_path.exists():
+            raise HTTPException(status_code=404, detail="Research papers corpus not found. Please run ingest_docs.py first.")
+        with open(papers_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        chunks = [DocumentChunk(**c) for c in data["chunks"]]
+        session_state["docs"] = data["docs"]
+        session_state["chunks"] = chunks
+        session_state["dataset_name"] = "research_papers"
+        session_state["embeddings"] = None
+        session_state["last_analysis"] = None
+        session_state["sweep_data"] = None
+        return {"status": "success", "dataset_name": "research_papers", "chunk_count": len(chunks)}
+    else:
+        sample_path = Path(__file__).resolve().parent.parent / "data" / "sample_documents.csv"
+        with open(sample_path, "rb") as f:
+            content = f.read()
+        docs = ingest_file("sample_documents.csv", content)
+        chunks = chunk_documents(docs)
+        session_state["docs"] = docs
+        session_state["chunks"] = chunks
+        session_state["dataset_name"] = "sample_documents.csv"
+        session_state["embeddings"] = None
+        session_state["last_analysis"] = None
+        session_state["sweep_data"] = None
+        return {"status": "success", "dataset_name": "sample_documents.csv", "chunk_count": len(chunks)}
 
 
 # ---------------------------------------------------------------------------
