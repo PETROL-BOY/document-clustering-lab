@@ -4,6 +4,8 @@
 > **Course:** Data Warehousing and Mining (DWM) Mini-Project  
 > **Stack:** Python 3.10+ · FastAPI · Google GenAI (`google-genai`) · Pinecone · React + Vite  
 
+> **🆕 New Feature:** Multiple API Key Fallback - Automatic failover across up to 3 Gemini API keys to avoid rate limits!
+
 ---
 
 ## 1. Overview & Problem Statement
@@ -77,7 +79,52 @@ cd d:\College\DWM\Mini_Project\Code\document-clustering-lab\backend
 
 # Configure secrets
 Copy-Item .env.example .env
-# Open backend/.env in your editor and insert GEMINI_API_KEY and PINECONE_API_KEY
+# Open backend/.env in your editor and insert API keys
+```
+
+#### 🆕 Multiple API Keys Configuration (Recommended)
+
+To avoid rate limit errors (HTTP 429), configure **multiple Gemini API keys** for automatic failover:
+
+```env
+# Primary API key - will be tried first
+GEMINI_API_KEY=your_primary_api_key_here
+
+# Fallback keys - automatic failover on rate limits
+GEMINI_API_KEY_2=your_secondary_api_key_here
+GEMINI_API_KEY_3=your_tertiary_api_key_here
+
+# Pinecone (optional)
+PINECONE_API_KEY=your_pinecone_api_key_here
+```
+
+**Benefits:**
+- 🚀 **3x API quota** capacity
+- ⚡ **Automatic failover** when hitting rate limits
+- 📊 **Zero downtime** during quota exhaustion
+- 🔄 **Smart retry logic** with exponential backoff
+
+**How it works:**
+1. System tries primary key first
+2. On 429 error, automatically switches to fallback key
+3. Logs show which key is being used
+4. All operations (embeddings, themes, Q&A) protected
+
+Get API keys from: [Google AI Studio](https://ai.google.dev/)
+
+For detailed setup, see: [`QUICK_START_FALLBACK.md`](QUICK_START_FALLBACK.md) or [`FALLBACK_API_KEYS.md`](FALLBACK_API_KEYS.md)
+
+#### Verify Configuration
+
+Run the test script:
+```powershell
+python test_fallback.py
+```
+
+Or check health endpoint after starting backend:
+```powershell
+curl http://127.0.0.1:8000/api/health
+# Look for "gemini_keys_count": 3
 ```
 
 ### Step 2: Run Unit Tests
@@ -136,7 +183,21 @@ python -m experiments.run_k_sweep --dataset data/sample_documents.csv --method g
 | Issue | Root Cause | Solution |
 |---|---|---|
 | `GEMINI_API_KEY is not configured` | Missing key in `.env` | Add key to `backend/.env` and restart backend server. |
+| **🆕 `429 quota hit` repeated errors** | **API rate limit exhausted** | **Add fallback keys: `GEMINI_API_KEY_2` and `GEMINI_API_KEY_3` in `.env`** |
 | `Scanned or image-based PDF` error | PDF has no selectable text | Upload a digital, text-based PDF or CSV/TXT file. |
 | `K must be strictly smaller than chunk count` | Selected K too large | Lower K in the UI or upload more documents. |
 | `Failed to connect to backend engine` | Backend server not running | Ensure `uvicorn app.api:app --reload --port 8000` is active. |
 | `Insufficient semantic overlap` in Chat | Cosine similarity $< 0.65$ | The question is out-of-corpus; the threshold safely prevents LLM hallucination. |
+| **🆕 Fallback keys not working** | **Server not restarted** | **Restart backend after adding keys to `.env`** |
+
+### 🆕 Monitoring Fallback Behavior
+
+Watch the backend console for automatic failover messages:
+
+```
+[embed] 429 quota hit on key #1 — waiting 10.0s before retry 1/6
+[embed] API key #1 exhausted, switching to fallback key #2
+[embed] Successfully switched to fallback API key #2
+```
+
+For more details, see: [`FALLBACK_API_KEYS.md`](FALLBACK_API_KEYS.md)

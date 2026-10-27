@@ -3,7 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 class Settings(BaseSettings):
+    # Primary and fallback Gemini API keys
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_api_key_2: str = Field(default="", alias="GEMINI_API_KEY_2")
+    gemini_api_key_3: str = Field(default="", alias="GEMINI_API_KEY_3")
     gemini_embed_model: str = Field(default="text-embedding-004", alias="GEMINI_EMBED_MODEL")
     gemini_gen_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_GEN_MODEL")
 
@@ -24,5 +27,16 @@ class Settings(BaseSettings):
 
     def get_cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    def get_available_gemini_keys(self) -> list[str]:
+        """Return list of all configured Gemini API keys (non-empty)."""
+        keys = []
+        if self.gemini_api_key:
+            keys.append(self.gemini_api_key)
+        if self.gemini_api_key_2:
+            keys.append(self.gemini_api_key_2)
+        if self.gemini_api_key_3:
+            keys.append(self.gemini_api_key_3)
+        return keys
 
 settings = Settings()

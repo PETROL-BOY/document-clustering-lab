@@ -267,12 +267,16 @@ def chunk_documents(docs: List[Dict[str, Any]], chunk_size: int = 1100, overlap:
 # Embeddings & Normalization
 # ---------------------------------------------------------------------------
 
-def get_genai_client():
-    """Build modern Google GenAI client."""
-    if not settings.gemini_api_key:
+def get_genai_client(api_key: str = None):
+    """
+    Build modern Google GenAI client with specified API key.
+    If no API key is provided, uses the primary key from settings.
+    """
+    key = api_key or settings.gemini_api_key
+    if not key:
         raise ValueError("GEMINI_API_KEY environment variable is not configured.")
     from google import genai
-    return genai.Client(api_key=settings.gemini_api_key)
+    return genai.Client(api_key=key)
 
 
 def _embed_batch_with_retry(
@@ -281,13 +285,23 @@ def _embed_batch_with_retry(
     contents: List[str],
     task_type: str,
     max_retries: int = 6,
+    current_key_index: int = 0,
 ) -> list:
     """
     Call client.models.embed_content with exponential backoff on 429 RESOURCE_EXHAUSTED.
     Starts at 10 s, doubles each attempt, caps at 120 s.
-    Raises the last exception if all retries exhausted.
+    If all retries exhausted with current API key, tries fallback keys.
+    Raises the last exception if all keys and retries exhausted.
     """
     from google.genai import types
+    from google import genai
+
+    available_keys = settings.get_available_gemini_keys()
+    if not available_keys:
+        raise ValueError("No Gemini API keys configured")
+    
+    if current_key_index >= len(available_keys):
+        raise RuntimeError("All API keys exhausted")
 
     delay = 10.0
     for attempt in range(max_retries):
@@ -297,6 +311,9 @@ def _embed_batch_with_retry(
                 contents=contents,
                 config=types.EmbedContentConfig(task_type=task_type),
             )
+            # Log which key was successful if we switched
+            if current_key_index > 0:
+                print(f"[embed] Successfully switched to fallback API key #{current_key_index + 1}")
             return response.embeddings
         except Exception as exc:
             exc_str = str(exc)
@@ -305,14 +322,27 @@ def _embed_batch_with_retry(
                 or "RESOURCE_EXHAUSTED" in exc_str
                 or "quota" in exc_str.lower()
             )
-            if is_quota and attempt < max_retries - 1:
+            if is_quota:
+                # If this is the last retry for this key, try the next key
+                if attempt >= max_retries - 1:
+                    next_key_index = current_key_index + 1
+                    if next_key_index < len(available_keys):
+                        print(f"[embed] API key #{current_key_index + 1} exhausted, switching to fallback key #{next_key_index + 1}")
+                        new_client = genai.Client(api_key=available_keys[next_key_index])
+                        return _embed_batch_with_retry(
+                            new_client, model_name, contents, task_type, 
+                            max_retries, next_key_index
+                        )
+                    else:
+                        raise RuntimeError("All API keys exhausted")
+                
                 # Try to parse the server-requested retry delay
                 import re as _re
                 match = _re.search(r"retry.*?(\d+(?:\.\d+)?)s", exc_str, _re.IGNORECASE)
                 server_delay = float(match.group(1)) if match else delay
                 wait = max(server_delay, delay)
                 print(
-                    f"[embed] 429 quota hit — waiting {wait:.1f}s before retry "
+                    f"[embed] 429 quota hit on key #{current_key_index + 1} — waiting {wait:.1f}s before retry "
                     f"{attempt + 1}/{max_retries}"
                 )
                 time.sleep(wait)
@@ -453,6 +483,71 @@ def compute_c_tfidf(chunks: List[DocumentChunk], labels: np.ndarray, top_n: int 
 # Structured LLM Thematic Extraction
 # ---------------------------------------------------------------------------
 
+def _generate_content_with_fallback(prompt: str, model_name: str, response_schema, temperature: float = 0.2, max_retries: int = 3) -> str:
+    """
+    Generate content with Gemini, trying fallback API keys if the primary fails.
+    Returns the generated text or raises an exception if all keys fail.
+    """
+    from google.genai import types
+    from google import genai
+    
+    available_keys = settings.get_available_gemini_keys()
+    if not available_keys:
+        raise ValueError("No Gemini API keys configured")
+    
+    last_exception = None
+    
+    for key_index, api_key in enumerate(available_keys):
+        try:
+            client = genai.Client(api_key=api_key)
+            
+            for attempt in range(max_retries):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=response_schema,
+                            temperature=temperature,
+                        )
+                    )
+                    
+                    # Log if using fallback key
+                    if key_index > 0:
+                        print(f"[generate] Successfully used fallback API key #{key_index + 1}")
+                    
+                    return response.text
+                    
+                except Exception as exc:
+                    exc_str = str(exc)
+                    is_quota = (
+                        "429" in exc_str
+                        or "RESOURCE_EXHAUSTED" in exc_str
+                        or "quota" in exc_str.lower()
+                    )
+                    
+                    if is_quota and attempt < max_retries - 1:
+                        wait_time = 5 * (attempt + 1)
+                        print(f"[generate] 429 quota hit on key #{key_index + 1} — waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                        time.sleep(wait_time)
+                    else:
+                        last_exception = exc
+                        if is_quota:
+                            print(f"[generate] API key #{key_index + 1} exhausted, trying next key...")
+                        break
+                        
+        except Exception as exc:
+            last_exception = exc
+            print(f"[generate] Failed with API key #{key_index + 1}: {str(exc)}")
+            continue
+    
+    # All keys failed
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("All API keys exhausted for content generation")
+
+
 def generate_theme_llm(representative_chunks: List[RepresentativeChunk], cluster_id: int) -> Dict[str, Any]:
     """
     Synthesize cluster label, summary, and keywords via Gemini using structured JSON schema.
@@ -465,9 +560,6 @@ def generate_theme_llm(representative_chunks: List[RepresentativeChunk], cluster
         }
 
     try:
-        client = get_genai_client()
-        from google.genai import types
-
         excerpts_text = "\n\n".join([
             f"--- Excerpt {i+1} [Title: {r.title}] ---\n{r.excerpt}"
             for i, r in enumerate(representative_chunks)
@@ -486,18 +578,15 @@ EXCERPTS:
 {excerpts_text}
 """
 
-        response = client.models.generate_content(
-            model=settings.gemini_gen_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ClusterThemeSchema,
-                temperature=0.2,
-            )
+        response_text = _generate_content_with_fallback(
+            prompt, 
+            settings.gemini_gen_model, 
+            ClusterThemeSchema,
+            temperature=0.2
         )
 
         import json
-        data = json.loads(response.text)
+        data = json.loads(response_text)
         return {
             "label": data.get("label", f"Cluster {cluster_id}"),
             "summary": data.get("summary", "No summary generated."),
@@ -826,14 +915,22 @@ def search_and_rag(
             "citations": citations
         }
 
-    # LLM generation
-    client = get_genai_client()
-    context_str = "\n\n".join([
-        f"[Source {i+1}: {c.title}]\n{chunks[top_indices[i]].text}"
-        for i, c in enumerate(citations)
-    ])
+    # LLM generation with fallback support
+    try:
+        available_keys = settings.get_available_gemini_keys()
+        if not available_keys:
+            return {
+                "answer": "No Gemini API keys configured.",
+                "threshold_passed": True,
+                "citations": citations
+            }
+        
+        context_str = "\n\n".join([
+            f"[Source {i+1}: {c.title}]\n{chunks[top_indices[i]].text}"
+            for i, c in enumerate(citations)
+        ])
 
-    prompt = f"""You are a helpful question-answering assistant for an academic document repository.
+        prompt = f"""You are a helpful question-answering assistant for an academic document repository.
 Answer the user's question using ONLY the provided excerpts.
 Cite your claims using [Source 1], [Source 2], etc.
 If the excerpts do not contain enough facts to answer, explicitly state that there is insufficient information.
@@ -845,13 +942,53 @@ QUESTION:
 {question}
 """
 
-    response = client.models.generate_content(
-        model=settings.gemini_gen_model,
-        contents=prompt
-    )
-
-    return {
-        "answer": response.text,
-        "threshold_passed": True,
-        "citations": citations
-    }
+        # Try each API key
+        last_exception = None
+        for key_index, api_key in enumerate(available_keys):
+            try:
+                from google import genai
+                client = genai.Client(api_key=api_key)
+                
+                response = client.models.generate_content(
+                    model=settings.gemini_gen_model,
+                    contents=prompt
+                )
+                
+                # Log if using fallback key
+                if key_index > 0:
+                    print(f"[RAG] Successfully used fallback API key #{key_index + 1}")
+                
+                return {
+                    "answer": response.text,
+                    "threshold_passed": True,
+                    "citations": citations
+                }
+            except Exception as exc:
+                exc_str = str(exc)
+                is_quota = (
+                    "429" in exc_str
+                    or "RESOURCE_EXHAUSTED" in exc_str
+                    or "quota" in exc_str.lower()
+                )
+                
+                if is_quota and key_index < len(available_keys) - 1:
+                    print(f"[RAG] API key #{key_index + 1} exhausted, trying next key...")
+                    last_exception = exc
+                    continue
+                else:
+                    last_exception = exc
+                    break
+        
+        # All keys failed
+        return {
+            "answer": f"Failed to generate answer: {str(last_exception)}",
+            "threshold_passed": True,
+            "citations": citations
+        }
+        
+    except Exception as exc:
+        return {
+            "answer": f"Error generating response: {str(exc)}",
+            "threshold_passed": True,
+            "citations": citations
+        }

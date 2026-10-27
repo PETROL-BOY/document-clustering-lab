@@ -132,9 +132,11 @@ def select_active_corpus(corpus_name: str = Query(..., description="'sample' or 
 @app.get("/api/health")
 def get_health():
     """Check health and provider connectivity."""
+    available_keys = settings.get_available_gemini_keys()
     return {
         "status": "healthy",
         "gemini_configured": bool(settings.gemini_api_key),
+        "gemini_keys_count": len(available_keys),
         "pinecone_configured": bool(settings.pinecone_api_key),
         "embed_model": settings.gemini_embed_model,
         "gen_model": settings.gemini_gen_model,
